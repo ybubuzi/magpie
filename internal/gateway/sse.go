@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// maxSSEBytes bounds a reader line and the relay sniffer's buffered data.
+// The sniffer must allow large terminal data lines without an event header.
+// This is not a total-stream or process-memory bound.
+const maxSSEBytes = 32 << 20
+
 // readSSE walks a server-sent event stream, calling fn with each event's
 // name and data. Data lines of one event are joined with newlines.
 func readSSE(r io.Reader, fn func(event, data string) error) error {
@@ -21,7 +26,7 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 // keepalive (": keepalive") as much as an answer.
 func readSSEAlive(r io.Reader, fn func(event, data string) error, alive func()) error {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64<<10), 32<<20)
+	sc.Buffer(make([]byte, 0, 64<<10), maxSSEBytes)
 	var event string
 	var data []string
 	flush := func() error {

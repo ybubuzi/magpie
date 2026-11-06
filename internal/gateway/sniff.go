@@ -54,7 +54,7 @@ func (s *usageSniffer) write(b []byte) {
 		s.line(bytes.TrimSuffix(s.buf[:i], []byte{'\r'}))
 		s.buf = s.buf[i+1:]
 	}
-	if len(s.buf) > 1<<20 { // a runaway line is not one we can use
+	if len(s.buf) > maxSSEBytes { // keep the same line bound as readSSEAlive
 		s.buf = nil
 		s.data = nil
 	}
@@ -74,7 +74,7 @@ func (s *usageSniffer) line(line []byte) {
 	}
 	if rest, ok := bytes.CutPrefix(line, []byte("data:")); ok {
 		rest = bytes.TrimPrefix(rest, []byte{' '})
-		if len(s.data)+len(rest)+1 > 1<<20 {
+		if len(s.data)+len(rest)+1 > maxSSEBytes {
 			s.data = nil // never let an unbounded event accumulate
 			return
 		}

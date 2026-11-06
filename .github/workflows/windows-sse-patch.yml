@@ -1,0 +1,109 @@
+name: Windows SSE patch build
+
+on:
+  push:
+    branches: [fix/sse-terminal-2753]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sse-patch-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PATCH_VERSION: 0.1.2753-ssefix.1
+
+jobs:
+  existing-checks:
+    name: Existing gateway checks (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Check formatting and patch scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l internal/gateway/sse.go internal/gateway/sniff.go)"
+          git diff --check HEAD^
+          git diff --stat HEAD^
+      - name: Vet existing packages
+        run: go vet -tags nogui ./...
+      - name: Run existing gateway tests in an isolated home
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GOPATH="$(go env GOPATH)"
+          export GOMODCACHE="$(go env GOMODCACHE)"
+          export GOCACHE="$(go env GOCACHE)"
+          export HOME="$RUNNER_TEMP/magpie-patch-home"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          mkdir -p "$HOME"
+          go test -tags nogui -count=1 -timeout 30m ./internal/gateway
+
+  windows:
+    name: Windows amd64 desktop build
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet Windows packages
+        run: go vet ./...
+      - name: Compile existing Windows tests
+        run: go test -run '^$' ./...
+      - name: Run existing SSE and stream-completeness checks
+        run: go test -count=1 -timeout 10m ./internal/gateway -run '^Test(Sniff|ReadSSE|PassthroughStream|PassthroughResponses|ResponsesUpstreamEndedShort|NonStreamEndedShort)'
+      - name: Build unsigned desktop executable using upstream release commands
+        shell: pwsh
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          go run github.com/tc-hib/go-winres@v0.3.3 make --in build/windows/winres.json --arch amd64 --out rsrc --file-version 0.1.2753 --product-version 0.1.2753
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -trimpath -buildvcs=false -ldflags='-s -w' -o internal/update/launcher-amd64.com ./internal/update/launcher
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -tags production,comlauncher -trimpath -ldflags="-s -w -X main.version=$env:PATCH_VERSION -H windowsgui" -o dist/magpie-windows-amd64.exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash dist/magpie-windows-amd64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  magpie-windows-amd64.exe" | Set-Content -Encoding ascii dist/SHA256SUMS.txt
+          go version -m dist/magpie-windows-amd64.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "Unsigned personal patch; base 8f128877ae05bfd4d752d66d516630d07d39d91f; commit $env:GITHUB_SHA; version $env:PATCH_VERSION" | Set-Content -Encoding utf8 dist/BUILD-INFO.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: magpie-windows-amd64-ssefix
+          path: |
+            dist/magpie-windows-amd64.exe
+            dist/SHA256SUMS.txt
+            dist/BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  verified:
+    name: Patch verification gate
+    needs: [existing-checks, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Existing checks and Windows build passed for $GITHUB_SHA. No new tests were added; live CPA verification remains a separate installation step."
